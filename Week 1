@@ -1,0 +1,90 @@
+# %% [markdown]
+# # Week 1 – Monthly Dataset Aggregation
+# 
+# This notebook combines all monthly CRMLS Sold and Listing datasets into two analysis-ready datasets. It filters the data to residential properties only and saves the combined results as CSV files.
+
+# %%
+import pandas as pd
+import glob
+import os
+
+# Folder containing the original monthly CSV files
+data_folder = "/Users/yangzewen/Desktop/IDX Summer 2026/Raw Data"
+
+# Folder where the combined output files will be saved
+output_folder = "/Users/yangzewen/Desktop/IDX Summer 2026/Week 1"
+
+# Create the output folder if it does not already exist
+os.makedirs(output_folder, exist_ok=True)
+
+# %%
+def process_data(pattern, output_name):
+
+
+    # Find all matching files and sort them in chronological order
+    files = sorted(glob.glob(os.path.join(data_folder, pattern)))
+
+    print(f"\nProcessing {pattern}")
+    print(f"Number of files found: {len(files)}")
+
+    if not files:
+        print("No files found. Please check the folder path or file name pattern.")
+        return
+
+    df_list = []
+    total_rows_before = 0
+
+    # Read each monthly CSV file
+    for file in files:
+        df = pd.read_csv(file, encoding="latin1")
+        rows = len(df)
+        total_rows_before += rows
+
+        print(f"{os.path.basename(file)} rows before concatenation: {rows:,}")
+        df_list.append(df)
+
+    # Row count before concatenation
+    print(f"\nTotal rows before concatenation: {total_rows_before:,}")
+
+    # Concatenate all monthly datasets
+    combined = pd.concat(df_list, ignore_index=True, sort=False)
+
+    # Row count after concatenation
+    print(f"Total rows after concatenation: {len(combined):,}")
+
+    if "PropertyType" not in combined.columns:
+        print("Error: PropertyType column not found.")
+        return
+
+    # Row count before Residential filter
+    rows_before_filter = len(combined)
+    print(f"Rows before Residential filter: {rows_before_filter:,}")
+
+    # Filter to Residential properties only
+    combined = combined[combined["PropertyType"] == "Residential"]
+
+    # Row count after Residential filter
+    rows_after_filter = len(combined)
+    print(f"Rows after Residential filter: {rows_after_filter:,}")
+
+    # Save the combined dataset to the Week 1 folder
+    output_path = os.path.join(output_folder, output_name)
+    combined.to_csv(output_path, index=False)
+
+    print(f"Saved to: {output_path}")
+
+# %% [markdown]
+# ## Process Sold Dataset
+# 
+# Combine all monthly Sold files, filter to residential properties, and save the final dataset.
+
+# %%
+process_data("CRMLSSold*.csv", "Final_Sold.csv")
+
+# %% [markdown]
+# ## Process Listing Dataset
+# 
+# Combine all monthly Listing files, filter to residential properties, and save the final dataset.
+
+# %%
+process_data("CRMLSListing*.csv", "Final_Listed.csv")
