@@ -1,4 +1,4 @@
-# # IDX MLS Analytics & Tableau Dashboard Program
+#  IDX MLS Analytics & Tableau Dashboard Program
  
 **Data Analyst Intern:** Najja A. King
 **LinkedIn:** [www.linkedin.com/in/najja-a-king](https://www.linkedin.com/in/najja-a-king)
