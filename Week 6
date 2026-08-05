@@ -1,0 +1,402 @@
+ from pathlib import Path
+
+import geopandas as gpd
+import numpy as np
+import pandas as pd
+
+
+# --------------------------------------------------
+# 1. Set file paths
+# --------------------------------------------------
+
+BASE_DIR = Path(__file__).resolve().parent
+
+INPUT_FILE = (
+    BASE_DIR.parent
+    / "Week 4-5"
+    / "Sold_Cleaned.csv"
+)
+
+DISTRICT_FILE = (
+    BASE_DIR
+    / "DistrictAreas2425"
+    / "DistrictAreas2425.shp"
+)
+
+OUTPUT_FILE = BASE_DIR / "Sold_Week6.csv"
+
+
+# --------------------------------------------------
+# 2. Load the cleaned sold dataset
+# --------------------------------------------------
+
+if not INPUT_FILE.exists():
+    raise FileNotFoundError(
+        f"Sold dataset was not found: {INPUT_FILE}"
+    )
+
+sold = pd.read_csv(
+    INPUT_FILE,
+    low_memory=False
+)
+
+print("Sold rows loaded:", len(sold))
+
+
+# --------------------------------------------------
+# 3. Validate the Residential filter
+# --------------------------------------------------
+
+assert "PropertyType" in sold.columns, \
+    "PropertyType is missing from Sold_Cleaned.csv."
+
+assert (sold["PropertyType"] == "Residential").all(), \
+    "Sold_Cleaned.csv contains non-Residential rows."
+
+
+# --------------------------------------------------
+# 4. Convert date columns
+# --------------------------------------------------
+
+date_columns = [
+    "CloseDate",
+    "PurchaseContractDate",
+    "ListingContractDate"
+]
+
+for column in date_columns:
+    sold[column] = pd.to_datetime(
+        sold[column],
+        errors="coerce"
+    )
+
+
+# --------------------------------------------------
+# 5. Convert numeric columns
+# --------------------------------------------------
+
+numeric_columns = [
+    "ClosePrice",
+    "OriginalListPrice",
+    "LivingArea",
+    "DaysOnMarket",
+    "Latitude",
+    "Longitude"
+]
+
+for column in numeric_columns:
+    sold[column] = pd.to_numeric(
+        sold[column],
+        errors="coerce"
+    )
+
+
+# --------------------------------------------------
+# 6. Create price-related metrics
+# --------------------------------------------------
+
+sold["PriceRatio"] = np.where(
+    sold["OriginalListPrice"] > 0,
+    sold["ClosePrice"] / sold["OriginalListPrice"],
+    np.nan
+)
+
+# The handbook gives the same formula for both ratios
+sold["CloseToOriginalListRatio"] = sold["PriceRatio"]
+
+sold["PricePerSqFt"] = np.where(
+    sold["LivingArea"] > 0,
+    sold["ClosePrice"] / sold["LivingArea"],
+    np.nan
+)
+
+
+# --------------------------------------------------
+# 7. Create the year-month field
+# --------------------------------------------------
+
+sold["YrMo"] = (
+    sold["CloseDate"]
+    .dt.to_period("M")
+    .astype("string")
+)
+
+
+# --------------------------------------------------
+# 8. Create timeline metrics
+# --------------------------------------------------
+
+sold["ListingToContractDays"] = (
+    sold["PurchaseContractDate"]
+    - sold["ListingContractDate"]
+).dt.days
+
+sold["ContractToCloseDays"] = (
+    sold["CloseDate"]
+    - sold["PurchaseContractDate"]
+).dt.days
+
+
+# --------------------------------------------------
+# 9. Load school district boundaries
+# --------------------------------------------------
+
+if not DISTRICT_FILE.exists():
+    raise FileNotFoundError(
+        f"School district shapefile was not found: {DISTRICT_FILE}"
+    )
+
+school_districts = gpd.read_file(
+    DISTRICT_FILE
+)
+
+print("\nSchool district columns:")
+print(school_districts.columns.tolist())
+
+
+# --------------------------------------------------
+# 10. Confirm and rename district fields
+# --------------------------------------------------
+
+required_district_columns = [
+    "DistrictNa",
+    "DistrictTy",
+    "CountyName",
+    "geometry"
+]
+
+missing_district_columns = [
+    column
+    for column in required_district_columns
+    if column not in school_districts.columns
+]
+
+if missing_district_columns:
+    raise KeyError(
+        "Missing required district columns: "
+        f"{missing_district_columns}. "
+        f"Available columns: {school_districts.columns.tolist()}"
+    )
+
+school_districts = school_districts.rename(
+    columns={
+        "DistrictNa": "DistrictName",
+        "DistrictTy": "DistrictType"
+    }
+)
+
+print("\nSchool district preview:")
+print(
+    school_districts[
+        [
+            "DistrictName",
+            "DistrictType",
+            "CountyName"
+        ]
+    ].head()
+)
+
+
+# --------------------------------------------------
+# 11. Create property points from coordinates
+# --------------------------------------------------
+
+valid_coordinate_mask = (
+    sold["Latitude"].notna()
+    & sold["Longitude"].notna()
+    & sold["Latitude"].between(32, 43)
+    & sold["Longitude"].between(-125, -113)
+)
+
+print(
+    "\nRows with valid California coordinates:",
+    valid_coordinate_mask.sum()
+)
+
+property_points = gpd.GeoDataFrame(
+    sold.loc[valid_coordinate_mask].copy(),
+    geometry=gpd.points_from_xy(
+        sold.loc[
+            valid_coordinate_mask,
+            "Longitude"
+        ],
+        sold.loc[
+            valid_coordinate_mask,
+            "Latitude"
+        ]
+    ),
+    crs="EPSG:4326"
+)
+
+
+# --------------------------------------------------
+# 12. Match properties to school districts
+# --------------------------------------------------
+
+school_districts = school_districts.to_crs(
+    property_points.crs
+)
+
+matched_properties = gpd.sjoin(
+    property_points,
+    school_districts[
+        [
+            "DistrictName",
+            "DistrictType",
+            "CountyName",
+            "geometry"
+        ]
+    ],
+    how="left",
+    predicate="within"
+)
+
+
+# --------------------------------------------------
+# 13. Keep one district match per property
+# --------------------------------------------------
+
+# Some district polygons may overlap, so keep one match per row
+matched_properties = matched_properties.loc[
+    ~matched_properties.index.duplicated(
+        keep="first"
+    )
+]
+
+sold["MappedSchoolDistrict"] = pd.NA
+sold["MappedSchoolDistrictType"] = pd.NA
+sold["MappedDistrictCounty"] = pd.NA
+
+sold.loc[
+    matched_properties.index,
+    "MappedSchoolDistrict"
+] = matched_properties["DistrictName"]
+
+sold.loc[
+    matched_properties.index,
+    "MappedSchoolDistrictType"
+] = matched_properties["DistrictType"]
+
+sold.loc[
+    matched_properties.index,
+    "MappedDistrictCounty"
+] = matched_properties["CountyName"]
+
+print(
+    "\nProperties matched to a school district:",
+    sold["MappedSchoolDistrict"].notna().sum()
+)
+
+
+# --------------------------------------------------
+# 14. Confirm the Week 6 metrics
+# --------------------------------------------------
+
+week6_metrics = [
+    "PriceRatio",
+    "CloseToOriginalListRatio",
+    "PricePerSqFt",
+    "DaysOnMarket",
+    "YrMo",
+    "ListingToContractDays",
+    "ContractToCloseDays",
+    "MappedSchoolDistrict"
+]
+
+missing_metrics = [
+    column
+    for column in week6_metrics
+    if column not in sold.columns
+]
+
+assert not missing_metrics, \
+    f"Missing Week 6 metrics: {missing_metrics}"
+
+
+# --------------------------------------------------
+# 15. Display a sample output table
+# --------------------------------------------------
+
+sample_columns = [
+    "ListingKey",
+    "CountyOrParish",
+    "ClosePrice",
+    "OriginalListPrice",
+    "LivingArea",
+    "PriceRatio",
+    "CloseToOriginalListRatio",
+    "PricePerSqFt",
+    "DaysOnMarket",
+    "YrMo",
+    "ListingToContractDays",
+    "ContractToCloseDays",
+    "MappedSchoolDistrict",
+    "MappedSchoolDistrictType"
+]
+
+sample_output = sold[
+    sample_columns
+].head(10)
+
+print("\nSample engineered metrics:")
+print(
+    sample_output.to_string(
+        index=False
+    )
+)
+
+
+# --------------------------------------------------
+# 16. Create a segmented summary by county
+# --------------------------------------------------
+
+county_summary = (
+    sold
+    .groupby(
+        "CountyOrParish",
+        dropna=False
+    )
+    .agg(
+        TotalSales=("ListingKey", "count"),
+        MedianClosePrice=("ClosePrice", "median"),
+        AveragePricePerSqFt=("PricePerSqFt", "mean"),
+        AverageDaysOnMarket=("DaysOnMarket", "mean"),
+        MedianCloseToOriginalListRatio=(
+            "CloseToOriginalListRatio",
+            "median"
+        ),
+        AverageListingToContractDays=(
+            "ListingToContractDays",
+            "mean"
+        ),
+        AverageContractToCloseDays=(
+            "ContractToCloseDays",
+            "mean"
+        )
+    )
+    .reset_index()
+    .sort_values(
+        "TotalSales",
+        ascending=False
+    )
+)
+
+print("\nCounty-level summary:")
+print(
+    county_summary
+    .head(20)
+    .to_string(index=False)
+)
+
+
+# --------------------------------------------------
+# 17. Save the final Week 6 dataset
+# --------------------------------------------------
+
+sold.to_csv(
+    OUTPUT_FILE,
+    index=False
+)
+
+print("\nWeek 6 completed successfully.")
+print("Final dataset saved to:", OUTPUT_FILE)
